@@ -10,6 +10,21 @@ This document outlines the implementation plan for a proof-of-concept (PoC) demo
 2. **Secondary Goal**: Show information can be extracted about the honest party's inputs through abort/success patterns
 3. **Stretch Goal**: Implement a full attack that recovers specific input bits
 
+## Design Principle: Clean Separation
+
+**The honest party runs completely unmodified original code.** This makes the PoC more convincing because:
+
+- It demonstrates the attack works against the real implementation
+- No modifications to the victim's code are needed
+- The attack is realistic - a malicious party only controls their own binary
+
+**Architecture:**
+
+- **Honest Party**: Runs unmodified `NDSS_online_example` binary
+- **Malicious Party**: Runs new `attack_poc` binary with attack logic
+
+Both binaries communicate over the network using the existing `--alone=0` mode.
+
 ---
 
 ## Phase 1: Code Modifications
@@ -34,60 +49,61 @@ void SetKey(PTy key) { key_ = key; }
 
 **New File**: `mosac/example/attack_poc.cc`
 
-Create a new binary that runs either as honest or malicious party based on rank:
+This binary is based on `NDSS_online_example.cc` but adds attack logic. The honest party continues to run the unmodified `NDSS_online_example` binary.
+
+Key additions to the malicious binary:
 
 ```cpp
-// Pseudocode structure:
+// Additional command line flag for attack
+llvm::cl::opt<uint64_t> cl_delta(
+    "delta", llvm::cl::init(1),
+    llvm::cl::desc("Key modification delta for attack (default: 1)"));
 
-// Honest party function - runs unmodified protocol
-auto run_honest_party(context, T, num, cache) {
-  auto prot = context->GetState<Protocol>();
+// Modified shuffle function with attack injection
+auto NDSS_shuffle2k_attack(/* same params as original */ uint64_t delta) {
+  // ... same setup as NDSS_online_example ...
 
-  if (cache) {
-    // Dry run for cache sizing
-    prot->RandA(num, true);
-    prot->ShuffleA_2k(T, shares, true);
-    prot->A2P(shuffle, true);
-    context->GetState<Correlation>()->force_cache();
-  }
-
-  // Real execution
-  auto shares = prot->RandA(num);
-  auto shuffle = prot->ShuffleA_2k(T, shares);
-  bool check = prot->NdssDelayCheck();
-
-  return {shuffle, shares, check};
-}
-
-// Malicious party function - modifies key before check
-auto run_malicious_party(context, T, num, cache, PTy delta) {
   auto prot = context->GetState<Protocol>();
   auto cr = context->GetState<Correlation>();
 
+  // Cache population (identical to original)
   if (cache) {
-    // Same dry run
-    prot->RandA(num, true);
-    prot->ShuffleA_2k(T, shares, true);
-    prot->A2P(shuffle, true);
+    auto shares = prot->RandA(num, true);
+    auto shuffle = prot->ShuffleA_2k(T, shares, true);
+    auto result = prot->A2P(shuffle, true);
     context->GetState<Correlation>()->force_cache();
   }
 
-  // Real execution - same as honest up to shuffle
+  // Online phase (identical to original up to shuffle)
   auto shares = prot->RandA(num);
   auto shuffle = prot->ShuffleA_2k(T, shares);
 
-  // >>> ATTACK: Modify key before NdssDelayCheck <<<
-  PTy original_key = prot->GetKey();
-  PTy new_key = original_key + delta;
-  prot->SetKey(new_key);
-  cr->SetKey(new_key);  // Also update Correlation's key for VOLE
+  // >>> ATTACK INJECTION POINT <<<
+  if (delta != 0) {
+    PTy original_key = prot->GetKey();
+    PTy new_key = original_key + PTy(delta);
 
-  // Now RandA(1) inside NdssDelayCheck will use the new key
-  bool check = prot->NdssDelayCheck();
+    SPDLOG_WARN("[ATTACK] Modifying key by delta = {}", delta);
 
-  return {shuffle, shares, check};
+    prot->SetKey(new_key);
+    cr->SetKey(new_key);
+  }
+
+  // MAC check - will now fail due to key mismatch
+  bool check_result = prot->NdssDelayCheck();
+
+  SPDLOG_INFO("[ATTACK] NdssDelayCheck result: {}",
+              check_result ? "PASS" : "FAIL");
+
+  // ... rest same as original ...
 }
 ```
+
+**Note**: The only differences from `NDSS_online_example.cc` are:
+
+1. Added `--delta` command line flag
+2. Attack injection between `ShuffleA_2k()` and `NdssDelayCheck()`
+3. Additional logging for attack demonstration
 
 ### 1.3 Add BUILD Target
 
@@ -270,49 +286,87 @@ Since `coef_i` are random but deterministic (from synced seed), the check result
 
 ## Phase 4: Test Harness
 
-### 4.1 Command Line Interface
+### 4.1 Running the Attack (Two Separate Terminals)
+
+The attack uses two separate Docker terminals - one for each party. This demonstrates that the honest party runs completely unmodified code.
+
+**Terminal 1 - Honest Party (runs unmodified NDSS_online_example):**
 
 ```bash
-# Run as honest party (rank 1)
-./attack_poc --rank=1 --parties=localhost:9000,localhost:9001 --mode=honest
-
-# Run as malicious party (rank 0) with specific delta
-./attack_poc --rank=0 --parties=localhost:9000,localhost:9001 --mode=malicious --delta=1
-
-# Run both in single process (for testing)
-./attack_poc --alone=1 --mode=attack_demo
+docker exec mosac-dev bazel run -c opt --jobs=4 \
+  --copt=-Wno-error=mismatched-new-delete \
+  //mosac/example:NDSS_online_example -- \
+  --alone=0 --rank=1 \
+  --parties=127.0.0.1:9530,127.0.0.1:9531 \
+  --small_power=3 --big_power=4 --cache=1
 ```
 
-### 4.2 Output Format
+**Terminal 2 - Malicious Party (runs attack_poc with delta):**
 
+```bash
+docker exec mosac-dev bazel run -c opt --jobs=4 \
+  --copt=-Wno-error=mismatched-new-delete \
+  //mosac/example:attack_poc -- \
+  --alone=0 --rank=0 \
+  --parties=127.0.0.1:9530,127.0.0.1:9531 \
+  --small_power=3 --big_power=4 --cache=1 \
+  --delta=1
 ```
-=== Attack PoC Execution ===
-Parameters: T=8, num=16, delta=1
-Party 0: MALICIOUS (key modified by delta=1)
-Party 1: HONEST
 
-[Phase 1] Offline complete. Cache populated.
-[Phase 2] Shuffle complete. Buffer populated.
-[Phase 3] Key modified: key_0' = key_0 + 1
-[Phase 4] NdssDelayCheck executing...
+### 4.2 Expected Output
 
-Result: CHECK FAILED
-Error term (computed): 0x...
+**Honest party (Terminal 1) - unmodified code:**
+
+```text
+[info] PROTOCOL START
+[info] [P1] T 8 && num 16, working mode: Fake Correlated Randomness && Cache
+... normal protocol execution ...
+[error] NdssDelayCheck failed!  <-- Attack detected as MAC failure
+```
+
+**Malicious party (Terminal 2) - attack binary:**
+
+```text
+[info] PROTOCOL START
+[info] [P0] T 8 && num 16, working mode: Fake Correlated Randomness && Cache
+[warn] [ATTACK] Modifying key by delta = 1
+[warn] [ATTACK] Original key: 0x1234567890abcdef
+[warn] [ATTACK] New key:      0x1234567890abcdf0
+[info] [ATTACK] NdssDelayCheck result: FAIL
 
 This demonstrates the vulnerability: the check failed due to
 key inconsistency between cached correlations and on-demand generation.
 ```
 
+### 4.3 Control Experiment (Honest vs Honest)
+
+To verify the protocol works correctly without attack:
+
+```bash
+# Terminal 1
+docker exec mosac-dev bazel run ... //mosac/example:NDSS_online_example -- \
+  --alone=0 --rank=1 --parties=127.0.0.1:9530,127.0.0.1:9531 ...
+
+# Terminal 2 (also honest - using delta=0)
+docker exec mosac-dev bazel run ... //mosac/example:attack_poc -- \
+  --alone=0 --rank=0 --parties=127.0.0.1:9530,127.0.0.1:9531 ... \
+  --delta=0
+```
+
+With `--delta=0`, no attack occurs and both parties should complete successfully.
+
 ---
 
 ## Phase 5: File Structure
 
-```
+```text
 mosac/example/
-├── attack_poc.cc           # Main PoC binary
-├── attack_poc_lib.h        # Shared attack utilities
-├── attack_poc_lib.cc       # Implementation
-└── BUILD.bazel             # Updated with new targets
+├── NDSS_online_example.cc  # UNMODIFIED - honest party runs this
+├── attack_poc.cc           # Malicious party binary (based on NDSS_online_example)
+└── BUILD.bazel             # Updated with attack_poc target
+
+mosac/ss/
+└── protocol.h              # Add SetKey() method
 
 docs/
 ├── SECURITY_VULNERABILITY_REPORT.md  # Existing report

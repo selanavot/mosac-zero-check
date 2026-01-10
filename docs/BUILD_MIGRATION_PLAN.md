@@ -181,10 +181,12 @@ If migration fails at any stage:
 
 ## Current Status
 
-- [x] Stage 0: Verify Original Code in Docker (PASSED - 11/11 tests)
-- [ ] Stage 1: YACL API Compatibility (Docker)
-- [ ] Stage 2: bzlmod Migration (Docker)
-- [ ] Stage 3: Native macOS Build
+- [x] Stage 0: Verify Original Code in Docker (PASSED - 11/11 tests + benchmark)
+- [ ] Stage 1: YACL API Compatibility (Docker) - **DEFERRED**
+- [ ] Stage 2: bzlmod Migration (Docker) - **DEFERRED**
+- [ ] Stage 3: Native macOS Build - **DEFERRED**
+
+**Decision:** Using Docker for development. Stages 1-3 deferred until Docker becomes a problem.
 
 ---
 
@@ -230,18 +232,55 @@ COPY . /MOSAC
 ### Build commands
 
 ```bash
-# Build Docker image
+# Build Docker image (one-time)
 docker build -t mosac:latest .
 
-# Build all targets
-docker run --rm -m 8g mosac:latest bazel build -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete //...
+# Create persistent container with volume mount (recommended for development)
+docker run -d --name mosac-dev -m 8g \
+  -v /path/to/Code:/MOSAC \
+  mosac:latest sleep infinity
 
-# Run all tests
-docker run --rm -m 8g mosac:latest bazel test -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete //...
+# Run builds inside container (uses cache, incremental builds are fast)
+docker exec mosac-dev bazel build -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete //...
+docker exec mosac-dev bazel test -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete //...
 
 # Interactive shell
-docker run -it --rm -m 8g mosac:latest bash
+docker exec -it mosac-dev bash
+
+# Stop/start container
+docker stop mosac-dev
+docker start mosac-dev
+
+# Remove container (loses Bazel cache)
+docker rm mosac-dev
 ```
+
+**Note:** With volume mount + persistent container:
+- First build: ~7 minutes (populates cache)
+- Incremental builds: <1 second (uses cache)
+
+### Benchmark Validation
+
+Successfully ran the NDSS shuffle benchmark:
+
+```bash
+docker exec mosac-dev bazel run -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete \
+  //mosac/example:NDSS_online_example -- --alone=1 --small_power=4 --big_power=8
+```
+
+Output:
+```
+[P0] T 16 && num 256, working mode: Fake Correlated Randomness && Cache
+NDSS_shuffle_online need 7 ms (0.007 s)
+send bytes: 344208 && recv bytes: 344208
+Double Check Done ✓
+```
+
+**Confirmed working:**
+- Two-party protocol runs correctly (both P0 and P1)
+- Shuffle operation completes in 7ms for 256 elements
+- Verification ("Double Check") passes
+- Communication: ~344KB sent/received per party
 
 ---
 
