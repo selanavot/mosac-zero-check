@@ -1,0 +1,395 @@
+# Proof of Concept Implementation Plan: Input-Guessing Attack
+
+## Overview
+
+This document outlines the implementation plan for a proof-of-concept (PoC) demonstrating the input-guessing attack vulnerability in the Song et al. NDSS'24 shuffle protocol implementation.
+
+## Goals
+
+1. **Primary Goal**: Demonstrate that a malicious party can cause the MAC check to behave differently based on the honest party's input values
+2. **Secondary Goal**: Show information can be extracted about the honest party's inputs through abort/success patterns
+3. **Stretch Goal**: Implement a full attack that recovers specific input bits
+
+---
+
+## Phase 1: Code Modifications
+
+### 1.1 Add SetKey Method to Protocol Class
+
+**File**: `mosac/ss/protocol.h`
+
+The `Protocol` class currently has `key_` as private with only a getter. We need to add a setter:
+
+```cpp
+// Current (line 41):
+PTy GetKey() const { return key_; }
+
+// Add after GetKey():
+void SetKey(PTy key) { key_ = key; }
+```
+
+**Rationale**: This allows the malicious party to modify their key share after the offline phase.
+
+### 1.2 Create Malicious Party Binary
+
+**New File**: `mosac/example/attack_poc.cc`
+
+Create a new binary that runs either as honest or malicious party based on rank:
+
+```cpp
+// Pseudocode structure:
+
+// Honest party function - runs unmodified protocol
+auto run_honest_party(context, T, num, cache) {
+  auto prot = context->GetState<Protocol>();
+
+  if (cache) {
+    // Dry run for cache sizing
+    prot->RandA(num, true);
+    prot->ShuffleA_2k(T, shares, true);
+    prot->A2P(shuffle, true);
+    context->GetState<Correlation>()->force_cache();
+  }
+
+  // Real execution
+  auto shares = prot->RandA(num);
+  auto shuffle = prot->ShuffleA_2k(T, shares);
+  bool check = prot->NdssDelayCheck();
+
+  return {shuffle, shares, check};
+}
+
+// Malicious party function - modifies key before check
+auto run_malicious_party(context, T, num, cache, PTy delta) {
+  auto prot = context->GetState<Protocol>();
+  auto cr = context->GetState<Correlation>();
+
+  if (cache) {
+    // Same dry run
+    prot->RandA(num, true);
+    prot->ShuffleA_2k(T, shares, true);
+    prot->A2P(shuffle, true);
+    context->GetState<Correlation>()->force_cache();
+  }
+
+  // Real execution - same as honest up to shuffle
+  auto shares = prot->RandA(num);
+  auto shuffle = prot->ShuffleA_2k(T, shares);
+
+  // >>> ATTACK: Modify key before NdssDelayCheck <<<
+  PTy original_key = prot->GetKey();
+  PTy new_key = original_key + delta;
+  prot->SetKey(new_key);
+  cr->SetKey(new_key);  // Also update Correlation's key for VOLE
+
+  // Now RandA(1) inside NdssDelayCheck will use the new key
+  bool check = prot->NdssDelayCheck();
+
+  return {shuffle, shares, check};
+}
+```
+
+### 1.3 Add BUILD Target
+
+**File**: `mosac/example/BUILD.bazel`
+
+```python
+mosac_cc_binary(
+    name = "attack_poc",
+    srcs = ["attack_poc.cc"],
+    deps = [
+        "//mosac/context:register",
+        "//mosac/ss:protocol",
+        "//mosac/utils:test_util",
+        "//mosac/utils:vec_op",
+        "@yacl//yacl/base:int128",
+        "@yacl//yacl/link",
+        "@yacl//yacl/utils:serialize",
+        "@yacl//yacl/utils:parallel",
+        "@llvm-project//llvm:Support",
+        "@com_google_absl//absl/strings",
+        ":macro",
+    ],
+)
+```
+
+---
+
+## Phase 2: Understanding the Attack Math
+
+### 2.1 Normal MAC Check (Honest Execution)
+
+In `NdssDelayCheck()`, the check works as follows:
+
+**Setup**:
+- Global MAC key: `α = key_0 + key_1`
+- Each authenticated share `[x]` has: `val_0 + val_1 = x` and `mac_0 + mac_1 = x * α`
+
+**Check Computation** (protocol.cc:319-346):
+
+1. Generate random authenticated share `r` via `RandA(1)`
+2. Accumulate: `r_val += Σ(coef_i * val_i)`, `r_mac += Σ(coef_i * mac_i)`
+3. Exchange and reconstruct: `real_val = r_val_0 + r_val_1`
+4. Compute: `zero_mac_i = r_mac_i - real_val * key_i`
+5. Party 0 negates: `zero_mac_0 = -zero_mac_0`
+6. Exchange with commitment and compare
+
+**Why it works (honest case)**:
+```
+zero_mac_0 + zero_mac_1
+  = -(r_mac_0 - real_val * key_0) + (r_mac_1 - real_val * key_1)
+  = -r_mac_0 + real_val * key_0 + r_mac_1 - real_val * key_1
+  = -(r_mac_0 + r_mac_1) + real_val * (key_0 + key_1)
+  = -real_val * α + real_val * α
+  = 0
+```
+
+### 2.2 Attack Scenario (Key Modification)
+
+When the malicious party (P0) modifies their key:
+
+**Before attack**:
+- Cached correlations use `key_0` (original)
+- Global key for cached shares: `α = key_0 + key_1`
+
+**After attack**:
+- P0 sets `key_0' = key_0 + Δ`
+- `RandA(1)` generates new `r` with `α' = key_0' + key_1 = α + Δ`
+
+**The check now computes**:
+
+For the new `r`:
+- `r` is authenticated w.r.t. `α' = α + Δ`
+- So `r_mac_0 + r_mac_1 = r_val * α'`
+
+For the buffered shares (from shuffle):
+- Still authenticated w.r.t. `α`
+- So `Σ mac_i = Σ val_i * α`
+
+The accumulated values:
+```
+r_mac = r_mac_original + Σ(coef_i * mac_i)
+      = (contribution from r w.r.t. α') + (contribution from buffer w.r.t. α)
+```
+
+The check computation:
+```
+zero_mac_0 = -(r_mac_0 - real_val * key_0')
+zero_mac_1 = r_mac_1 - real_val * key_1
+
+zero_mac_0 + zero_mac_1
+  = -r_mac_0 + real_val * key_0' + r_mac_1 - real_val * key_1
+  = -(r_mac_0 + r_mac_1) + real_val * (key_0' + key_1)
+  = -(r_mac_0 + r_mac_1) + real_val * α'
+```
+
+Now, `r_mac_0 + r_mac_1` contains:
+- From `r`: `r_val * α'` (consistent with `α'`)
+- From buffer: `Σ(coef_i * val_i) * α` (inconsistent - uses old `α`)
+
+So:
+```
+r_mac_0 + r_mac_1 = r_val * α' + Σ(coef_i * val_i) * α
+
+zero_mac_0 + zero_mac_1
+  = -(r_val * α' + Σ(coef_i * val_i) * α) + real_val * α'
+  = -r_val * α' - Σ(coef_i * val_i) * α + (r_val + Σ(coef_i * val_i)) * α'
+  = -r_val * α' - Σ(coef_i * val_i) * α + r_val * α' + Σ(coef_i * val_i) * α'
+  = Σ(coef_i * val_i) * (α' - α)
+  = Σ(coef_i * val_i) * Δ
+```
+
+### 2.3 Key Insight
+
+**The error term is**: `Σ(coef_i * val_i) * Δ`
+
+Where:
+- `coef_i` are random coefficients (known to both parties via synced seed)
+- `val_i` are the VALUE shares in the buffer (depend on honest party's input!)
+- `Δ` is the key modification (controlled by attacker)
+
+**For the check to pass**: `Σ(coef_i * val_i) * Δ = 0`
+
+This happens when:
+1. `Δ = 0` (no attack), OR
+2. `Σ(coef_i * val_i) = 0` (depends on the actual values!)
+
+Since `coef_i` are random but deterministic (from synced seed), the check result depends on the buffered values, which in turn depend on the honest party's inputs.
+
+---
+
+## Phase 3: PoC Implementation Steps
+
+### 3.1 Basic Demonstration (Milestone 1)
+
+**Goal**: Show that modifying the key causes the check to fail in a predictable way.
+
+**Steps**:
+1. Run honest vs honest - verify check passes
+2. Run malicious vs honest with `Δ = 1` - observe check fails
+3. Verify the failure is due to the key mismatch
+
+**Expected Output**:
+```
+[Honest vs Honest] NdssDelayCheck: PASS
+[Malicious vs Honest, Δ=1] NdssDelayCheck: FAIL
+```
+
+### 3.2 Input-Dependent Behavior (Milestone 2)
+
+**Goal**: Demonstrate that the check result depends on the honest party's input values.
+
+**Approach**:
+1. Create a controlled input where we know the honest party's values
+2. Run multiple times with different `Δ` values
+3. Observe pattern in pass/fail
+
+**Challenge**: The values in the buffer are transformed by the shuffle, so we need to understand the relationship between input and buffer contents.
+
+**Simplification for PoC**:
+- Use a very small input (e.g., `num = 8`, `T = 4`)
+- Have the honest party use known input values
+- The malicious party observes abort patterns
+
+### 3.3 Information Extraction (Milestone 3)
+
+**Goal**: Actually extract information about the honest party's input.
+
+**Approach**:
+1. Run the protocol multiple times with the same honest input
+2. Each run, use a different `Δ` value
+3. Collect the pass/fail results
+4. Analyze to deduce information about the input
+
+**Mathematical basis**:
+- The error term `Σ(coef_i * val_i) * Δ` is linear in `Δ`
+- If we can find a `Δ` where the check passes (error = 0), we learn that `Σ(coef_i * val_i) = 0`
+- Multiple such equations can potentially solve for individual values
+
+---
+
+## Phase 4: Test Harness
+
+### 4.1 Command Line Interface
+
+```bash
+# Run as honest party (rank 1)
+./attack_poc --rank=1 --parties=localhost:9000,localhost:9001 --mode=honest
+
+# Run as malicious party (rank 0) with specific delta
+./attack_poc --rank=0 --parties=localhost:9000,localhost:9001 --mode=malicious --delta=1
+
+# Run both in single process (for testing)
+./attack_poc --alone=1 --mode=attack_demo
+```
+
+### 4.2 Output Format
+
+```
+=== Attack PoC Execution ===
+Parameters: T=8, num=16, delta=1
+Party 0: MALICIOUS (key modified by delta=1)
+Party 1: HONEST
+
+[Phase 1] Offline complete. Cache populated.
+[Phase 2] Shuffle complete. Buffer populated.
+[Phase 3] Key modified: key_0' = key_0 + 1
+[Phase 4] NdssDelayCheck executing...
+
+Result: CHECK FAILED
+Error term (computed): 0x...
+
+This demonstrates the vulnerability: the check failed due to
+key inconsistency between cached correlations and on-demand generation.
+```
+
+---
+
+## Phase 5: File Structure
+
+```
+mosac/example/
+├── attack_poc.cc           # Main PoC binary
+├── attack_poc_lib.h        # Shared attack utilities
+├── attack_poc_lib.cc       # Implementation
+└── BUILD.bazel             # Updated with new targets
+
+docs/
+├── SECURITY_VULNERABILITY_REPORT.md  # Existing report
+└── POC_IMPLEMENTATION_PLAN.md        # This document
+```
+
+---
+
+## Phase 6: Validation Checklist
+
+### Pre-Implementation
+- [ ] Verify build system works (`bazel build //mosac/example:NDSS_online_example`)
+- [ ] Run existing example to understand normal behavior
+- [ ] Understand the network setup (ports, connection order)
+
+### Milestone 1: Basic Key Modification
+- [ ] Add `SetKey` to Protocol class
+- [ ] Create attack_poc.cc skeleton
+- [ ] Verify honest-vs-honest still works
+- [ ] Implement key modification
+- [ ] Verify malicious-vs-honest causes check failure
+
+### Milestone 2: Controlled Demonstration
+- [ ] Add logging to show error term computation
+- [ ] Demonstrate input-dependent behavior with small examples
+- [ ] Document specific inputs that cause pass vs fail
+
+### Milestone 3: Information Extraction
+- [ ] Implement multi-run attack framework
+- [ ] Collect and analyze abort patterns
+- [ ] Demonstrate partial input recovery
+
+---
+
+## Appendix A: Key Code Locations
+
+| Component | File | Lines | Purpose |
+|-----------|------|-------|---------|
+| Protocol key storage | `protocol.h` | 27 | `PTy key_` member |
+| Protocol GetKey | `protocol.h` | 41 | Getter for key |
+| Correlation SetKey | `true_cr.h` | 101-107 | Already exists |
+| NdssDelayCheck | `protocol.cc` | 305-353 | The vulnerable check |
+| RandA | `ashare.cc` | 199-201 | Calls RandomAuth |
+| RandomAuth | `cr.cc` | 45-64 | Cache or on-demand |
+| RandomSet (uses key) | `true_cr.cc` | 230-246 | MAC computation |
+
+## Appendix B: Attack Timeline
+
+```
+Time →
+─────────────────────────────────────────────────────────────────────────────
+│         OFFLINE          │      ONLINE      │     ATTACK      │   CHECK   │
+├──────────────────────────┼──────────────────┼─────────────────┼───────────┤
+│ SetupContext()           │ RandA(num)       │ SetKey(k + Δ)   │ RandA(1)  │
+│ force_cache() with key_0 │ ShuffleA_2k()    │ CR.SetKey(k+Δ)  │ Compare   │
+│                          │ NdssBufferAppend │                 │           │
+├──────────────────────────┼──────────────────┼─────────────────┼───────────┤
+│ Uses: key_0              │ Uses: cached     │ Modifies key    │ Uses: k+Δ │
+│ Global α = k0 + k1       │ correlations     │                 │ NEW r     │
+─────────────────────────────────────────────────────────────────────────────
+                                                                      ↑
+                                                               VULNERABILITY:
+                                                               r uses α+Δ but
+                                                               buffer uses α
+```
+
+## Appendix C: Expected Effort
+
+| Phase | Estimated Time | Dependencies |
+|-------|---------------|--------------|
+| Phase 1: Code Mods | 1-2 hours | None |
+| Phase 2: Math Understanding | 1-2 hours | Phase 1 |
+| Phase 3.1: Basic Demo | 2-3 hours | Phase 1, 2 |
+| Phase 3.2: Input-Dependent | 3-4 hours | Phase 3.1 |
+| Phase 3.3: Information Extraction | 4-8 hours | Phase 3.2 |
+| Phase 4: Test Harness | 2-3 hours | Phase 3.1 |
+
+**Total**: ~15-22 hours for complete implementation
+
+**Minimum viable PoC** (Milestone 1 only): ~4-6 hours
