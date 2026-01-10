@@ -181,9 +181,67 @@ If migration fails at any stage:
 
 ## Current Status
 
+- [x] Stage 0: Verify Original Code in Docker (PASSED - 11/11 tests)
 - [ ] Stage 1: YACL API Compatibility (Docker)
 - [ ] Stage 2: bzlmod Migration (Docker)
 - [ ] Stage 3: Native macOS Build
+
+---
+
+## Stage 0 Findings
+
+Required fixes for Docker build:
+
+1. Use `FROM ubuntu:22.04` (not `ubuntu:latest` which pulls 24.04)
+   - Ubuntu 24.04 has GCC 13+ which has stricter warnings and breaks LLVM compilation
+   - Ubuntu 22.04 has GCC 11 which is compatible
+
+2. Add build flag: `--copt=-Wno-error=mismatched-new-delete`
+   - The msgpack library has a malloc/delete mismatch warning that GCC 11 treats as error
+   - This flag suppresses that specific warning-as-error
+
+3. Add `g++` and `git` to apt-get install
+   - Original Dockerfile only had `gcc`, missing C++ compiler
+   - `git` needed for fetching dependencies
+
+### Updated Dockerfile
+
+```dockerfile
+FROM ubuntu:22.04
+
+WORKDIR /MOSAC
+
+# install dependency
+RUN apt-get update
+RUN apt-get install -y gcc g++ cmake nasm iproute2 npm ninja-build git
+
+# install bazelisk
+RUN npm install -g @bazel/bazelisk
+RUN alias bazel='bazelisk'
+
+# copy source code
+COPY . /MOSAC
+
+# Build command (run manually):
+# bazel build -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete //...
+# bazel test -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete //...
+```
+
+### Build commands
+
+```bash
+# Build Docker image
+docker build -t mosac:latest .
+
+# Build all targets
+docker run --rm -m 8g mosac:latest bazel build -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete //...
+
+# Run all tests
+docker run --rm -m 8g mosac:latest bazel test -c opt --jobs=4 --copt=-Wno-error=mismatched-new-delete //...
+
+# Interactive shell
+docker run -it --rm -m 8g mosac:latest bash
+```
 
 ---
 
