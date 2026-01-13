@@ -303,22 +303,42 @@ void Protocol::NdssBufferAppend(const ATy& in) {
 }
 
 bool Protocol::NdssDelayCheck() {
+  auto rank = ctx_->GetRank();
+  SPDLOG_INFO("[P{}] === NdssDelayCheck START ===", rank);
+
   YACL_ENFORCE(ndss_val_buff_.size() == ndss_mac_buff_.size());
   if (ndss_val_buff_.size() == 0) {
+    SPDLOG_INFO("[P{}] Buffer empty, returning true", rank);
     return true;
   }
   const size_t seed_len = ndss_val_buff_.size();
+  SPDLOG_INFO("[P{}] Buffer has {} batches", rank, seed_len);
+
+  // Log buffer contents summary
+  size_t total_elements = 0;
+  for (size_t i = 0; i < seed_len; ++i) {
+    total_elements += ndss_val_buff_[i].size();
+  }
+  SPDLOG_INFO("[P{}] Total buffered elements: {}", rank, total_elements);
 
   auto conn = ctx_->GetConnection();
   auto sync_seed = conn->SyncSeed();
+  SPDLOG_INFO("[P{}] sync_seed: 0x{:016x}", rank, static_cast<uint64_t>(sync_seed));
 
   auto prg = yacl::crypto::Prg<uint128_t>(sync_seed);
   std::vector<uint128_t> ext_seed(seed_len);
   prg.Fill(absl::MakeSpan(ext_seed));
 
+  SPDLOG_INFO("[P{}] Calling RandA(1) - this may use modified key!", rank);
+  SPDLOG_INFO("[P{}] Current key_: 0x{:016x}", rank, key_.GetVal());
   auto r = RandA(1);
   auto& r_val = r[0].val;
   auto& r_mac = r[0].mac;
+  SPDLOG_INFO("[P{}] r from RandA(1): val=0x{:016x}, mac=0x{:016x}", rank, r_val.GetVal(), r_mac.GetVal());
+
+  // Track accumulated values for debugging
+  PTy accumulated_val_affine(0);
+  PTy accumulated_mac_affine(0);
 
   for (size_t i = 0; i < seed_len; ++i) {
     YACL_ENFORCE(ndss_val_buff_[i].size() == ndss_mac_buff_[i].size());
@@ -329,22 +349,53 @@ bool Protocol::NdssDelayCheck() {
                                           absl::MakeSpan(ndss_val_buff_[i]));
     auto mac_affine = internal::op::InPro(absl::MakeSpan(coef),
                                           absl::MakeSpan(ndss_mac_buff_[i]));
+
+    accumulated_val_affine = accumulated_val_affine + val_affine;
+    accumulated_mac_affine = accumulated_mac_affine + mac_affine;
+
     r_val = r_val + val_affine;
     r_mac = r_mac + mac_affine;
+
+    if (i < 3) {  // Log first few batches in detail
+      SPDLOG_INFO("[P{}] Batch {}: len={}, val_affine=0x{:016x}, mac_affine=0x{:016x}",
+                  rank, i, cur_len, val_affine.GetVal(), mac_affine.GetVal());
+    }
   }
 
+  SPDLOG_INFO("[P{}] Total accumulated from buffer: val_affine=0x{:016x}, mac_affine=0x{:016x}",
+              rank, accumulated_val_affine.GetVal(), accumulated_mac_affine.GetVal());
+  SPDLOG_INFO("[P{}] After accumulation: r_val=0x{:016x}, r_mac=0x{:016x}",
+              rank, r_val.GetVal(), r_mac.GetVal());
+
   auto remote_r_val = conn->Exchange(r_val.GetVal());
+  SPDLOG_INFO("[P{}] Exchanged r_val. Local: 0x{:016x}, Remote: 0x{:016x}",
+              rank, r_val.GetVal(), remote_r_val);
+
   auto real_val = r_val + PTy(remote_r_val);
+  SPDLOG_INFO("[P{}] Reconstructed real_val = 0x{:016x}", rank, real_val.GetVal());
+
   auto zero_mac = r_mac - real_val * key_;
+  SPDLOG_INFO("[P{}] zero_mac (before negation) = r_mac - real_val * key_ = 0x{:016x}",
+              rank, zero_mac.GetVal());
+  SPDLOG_INFO("[P{}]   r_mac=0x{:016x}, real_val=0x{:016x}, key_=0x{:016x}",
+              rank, r_mac.GetVal(), real_val.GetVal(), key_.GetVal());
 
   if (ctx_->GetRank() == 0) {
     zero_mac = PTy::Neg(zero_mac);
+    SPDLOG_INFO("[P{}] After negation (P0 only): zero_mac = 0x{:016x}", rank, zero_mac.GetVal());
   }
 
   auto bv = yacl::ByteContainerView(&zero_mac, sizeof(PTy));
   auto remote_bv = conn->ExchangeWithCommit(bv);
+
+  PTy remote_zero_mac;
+  std::memcpy(&remote_zero_mac, remote_bv.data(), sizeof(PTy));
+  SPDLOG_INFO("[P{}] Comparing zero_mac: local=0x{:016x}, remote=0x{:016x}",
+              rank, zero_mac.GetVal(), remote_zero_mac.GetVal());
+
   bool flag = (bv == yacl::ByteContainerView(remote_bv));
-  SPDLOG_INFO("NdssDelayCheck is {}", flag);
+  SPDLOG_INFO("[P{}] NdssDelayCheck result: {}", rank, flag ? "PASS" : "FAIL");
+  SPDLOG_INFO("[P{}] === NdssDelayCheck END ===", rank);
 
   ndss_val_buff_.clear();
   ndss_mac_buff_.clear();

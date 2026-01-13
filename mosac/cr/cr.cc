@@ -56,7 +56,7 @@ AuthTy Correlation::RandomAuth(size_t num) {
         absl::MakeSpan(reinterpret_cast<internal::PTy*>(out.data()), 2 * num));
     return AuthTy(std::move(out));
   }
-  SPDLOG_DEBUG("RandomAuth Uncached");
+  SPDLOG_INFO("RandomAuth Uncached (num={})", num);
   std::vector<internal::ATy> ret(num);
   RandomAuth(absl::MakeSpan(ret));
   YACL_ENFORCE(DelayCheck());
