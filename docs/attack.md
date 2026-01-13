@@ -1,16 +1,30 @@
 # Selective Failure Attack PoC
 
-## Running the Attack
+## Docker Setup
 
-By default, the protocol shuffles **16 elements** (2^4, controlled by `--big_power`).
+Start the Docker container (from the repository root):
 
-### Prerequisites
+```bash
+docker run -d --name mosac-dev -v "$(pwd)":/workspace -w /workspace secretflow/ubuntu-base-ci:latest tail -f /dev/null
+```
+
+If the container already exists but is stopped:
+
+```bash
+docker start mosac-dev
+```
+
+## Building
 
 Build both binaries inside the Docker container:
 
 ```bash
 docker exec mosac-dev bazel build //mosac/example:NDSS_online_example //mosac/example:attack_poc
 ```
+
+## Running the Attack
+
+By default, the protocol shuffles **16 elements** (2^4, controlled by `--big_power`).
 
 ### Test 1: Attack with Zero Inputs (PASS expected)
 
