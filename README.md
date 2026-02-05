@@ -1,6 +1,8 @@
 # MOSAC - Selective Failure Attack PoC
 
-This repository contains a proof-of-concept implementation of a selective failure attack against the Song et al. NDSS'24 shuffle protocol.
+This repository contains a proof-of-concept implementation of a selective failure attack against the Song et al. NDSS'24 shuffle protocol implementation.
+
+See the paper **FLOSS: Fast Linear Online Secret-Shared Shuffling** for more details.
 
 ## Quick Start
 
