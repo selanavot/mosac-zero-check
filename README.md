@@ -8,9 +8,9 @@ Please see our paper (FLOSS) for details regarding the vulnerability.
 
 ## Background
 
-We obtained the MOSAC implementation directly from Song et al, whom we thank for sharing it with us and allowing us to distribute it. Note that the code was never made public by the original authors.
+We obtained the MOSAC implementation directly from Song et al., whom we thank for sharing it with us and allowing us to distribute it. Note that the code was never made public by the original authors.
 
-Our goal in this repository to demonstrate that the attack works against the honest party's code **exactly as we obtained it**, without any modifications to the protocol logic. This is important because:
+Our goal in this repository is to demonstrate that the attack works against the honest party's code **exactly as we obtained it**, without any modifications to the protocol logic. This is important because:
 
 1. It proves the vulnerability exists in the real implementation, not a weakened version
 2. It shows the attack is practical—the adversary only needs to deviate from the protocol on their own side
@@ -27,7 +27,7 @@ See [docs/NDSS_online_example_changelog.md](docs/NDSS_online_example_changelog.m
 
 ## Repository Structure
 
-The only files that are relevant for our attack our below.
+The only files that are relevant for our attack are below.
 
 ```text
 mosac/example/
@@ -41,7 +41,7 @@ The rest of the repo contains the entire MOSAC protocol, as well as other exampl
 
 - [docs/attack.md](docs/attack.md) — Attack details, including instructions for reproducing the attack
 - [docs/NDSS_online_example_changelog.md](docs/NDSS_online_example_changelog.md) — Complete changelog of the (minimal) changes we made to the honest party's code.
-- [docs/original_README.md](docs/original_README.md) — Original (unmodified) MOSAC documentation from Song et al, which used to be at the root of the repo.
+- [docs/original_README.md](docs/original_README.md) — Original (unmodified) MOSAC documentation from Song et al., which used to be at the root of the repo.
 
 ## Quick Start
 
