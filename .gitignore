@@ -54,3 +54,6 @@ external
 rpc_data
 
 thirdparty/*
+
+# claude context files
+docs/for-claude-only/
