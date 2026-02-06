@@ -75,60 +75,23 @@ auto NDSS_shuffle2k(const std::shared_ptr<yacl::link::Context> &lctx, size_t T,
 
   SPDLOG_INFO("[P{}] Initial key: 0x{:016x}", rank, prot->GetKey().GetVal());
 
-  // DISABLED FOR DEBUGGING: Skip cache to see exact correlation generation timing
-  // if (cache) {
-  //   SPDLOG_INFO("[P{}] === DRY RUN (cache sizing) ===", rank);
-  //   auto shares = prot->RandA(num, true);
-  //   auto shuffle = prot->ShuffleA_2k(T, shares, true);
-  //   auto result = prot->A2P(shuffle, true);
-  //
-  //   context->GetState<Correlation>()->force_cache();
-  //   SPDLOG_INFO("[P{}] Cache populated", rank);
-  // }
-  SPDLOG_INFO("[P{}] Cache DISABLED for debugging", rank);
+  if (cache) {
+    auto shares = prot->RandA(num, true);
+    auto shuffle = prot->ShuffleA_2k(T, shares, true);
+    auto result = prot->A2P(shuffle, true);
 
-  // Generate input shares based on input_mode
-  std::vector<ATy> shares;
-  if (input_mode == 0) {
-    // Random inputs
-    shares = prot->RandA(num);
-    SPDLOG_INFO("[P{}] Using RANDOM inputs", rank);
-  } else {
-    // All zeros - use ZerosA
-    shares = prot->ZerosA(num);
-    SPDLOG_INFO("[P{}] Using ALL ZEROS inputs", rank);
+    context->GetState<Correlation>()->force_cache();
   }
 
-  // Debug: Log first few input shares
-  SPDLOG_INFO("[P{}] === INPUT SHARES (first 4) ===", rank);
-  for (size_t i = 0; i < std::min((size_t)4, shares.size()); ++i) {
-    SPDLOG_INFO("[P{}] shares[{}]: val=0x{:016x}, mac=0x{:016x}",
-                rank, i, shares[i].val.GetVal(), shares[i].mac.GetVal());
+  std::vector<ATy> shares;
+  if (input_mode == 0) {
+    shares = prot->RandA(num);
+  } else {
+    shares = prot->ZerosA(num);
   }
 
   TIMER_N_COMM_START(NDSS_shuffle_online);
-  SPDLOG_INFO("[P{}] === SHUFFLE START ===", rank);
   auto shuffle = prot->ShuffleA_2k(T, shares);
-  SPDLOG_INFO("[P{}] === SHUFFLE END ===", rank);
-
-  // Debug: Log first few shuffle outputs
-  SPDLOG_INFO("[P{}] === SHUFFLE OUTPUT (first 4) ===", rank);
-  for (size_t i = 0; i < std::min((size_t)4, shuffle.size()); ++i) {
-    SPDLOG_INFO("[P{}] shuffle[{}]: val=0x{:016x}, mac=0x{:016x}",
-                rank, i, shuffle[i].val.GetVal(), shuffle[i].mac.GetVal());
-  }
-
-  // Debug: Reconstruct and log first few shuffle values to verify if zeros preserved
-  // This requires exchanging values with the other party
-  SPDLOG_INFO("[P{}] === RECONSTRUCTING SHUFFLE VALUES (first 4) ===", rank);
-  {
-    auto conn = context->GetConnection();
-    for (size_t i = 0; i < std::min((size_t)4, shuffle.size()); ++i) {
-      auto remote_val = conn->Exchange(shuffle[i].val.GetVal());
-      auto reconstructed = shuffle[i].val + PTy(remote_val);
-      SPDLOG_INFO("[P{}] shuffle[{}] reconstructed value = 0x{:016x}", rank, i, reconstructed.GetVal());
-    }
-  }
 
   // >>> ATTACK INJECTION POINT <<<
   // At this point, the cache is exhausted. The RandA(1) call inside

@@ -69,42 +69,12 @@ auto NDSS_shuffle2k(const std::shared_ptr<yacl::link::Context> &lctx, size_t T,
   std::vector<internal::ATy> shares;
   if (input_mode == 0) {
     shares = prot->RandA(num);
-    SPDLOG_INFO("[P{}] Using RANDOM inputs", rank);
   } else {
     shares = prot->ZerosA(num);
-    SPDLOG_INFO("[P{}] Using ALL ZEROS inputs", rank);
-  }
-
-  // Debug: Log first few input shares
-  SPDLOG_INFO("[P{}] === INPUT SHARES (first 4) ===", rank);
-  for (size_t i = 0; i < std::min((size_t)4, shares.size()); ++i) {
-    SPDLOG_INFO("[P{}] shares[{}]: val=0x{:016x}, mac=0x{:016x}",
-                rank, i, shares[i].val.GetVal(), shares[i].mac.GetVal());
   }
 
   TIMER_N_COMM_START(NDSS_shuffle_online);
-  SPDLOG_INFO("[P{}] === SHUFFLE START ===", rank);
   auto shuffle = prot->ShuffleA_2k(T, shares);
-  SPDLOG_INFO("[P{}] === SHUFFLE END ===", rank);
-
-  // Debug: Log first few shuffle outputs
-  SPDLOG_INFO("[P{}] === SHUFFLE OUTPUT (first 4) ===", rank);
-  for (size_t i = 0; i < std::min((size_t)4, shuffle.size()); ++i) {
-    SPDLOG_INFO("[P{}] shuffle[{}]: val=0x{:016x}, mac=0x{:016x}",
-                rank, i, shuffle[i].val.GetVal(), shuffle[i].mac.GetVal());
-  }
-
-  // Debug: Reconstruct and log first few shuffle values to verify if zeros preserved
-  // This requires exchanging values with the other party
-  SPDLOG_INFO("[P{}] === RECONSTRUCTING SHUFFLE VALUES (first 4) ===", rank);
-  {
-    auto conn = context->GetConnection();
-    for (size_t i = 0; i < std::min((size_t)4, shuffle.size()); ++i) {
-      auto remote_val = conn->Exchange(shuffle[i].val.GetVal());
-      auto reconstructed = shuffle[i].val + internal::PTy(remote_val);
-      SPDLOG_INFO("[P{}] shuffle[{}] reconstructed value = 0x{:016x}", rank, i, reconstructed.GetVal());
-    }
-  }
 
   YACL_ENFORCE(prot->NdssDelayCheck());
   TIMER_N_COMM_END_PRINT(NDSS_shuffle_online);
