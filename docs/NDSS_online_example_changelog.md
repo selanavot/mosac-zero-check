@@ -1,6 +1,6 @@
 # NDSS_online_example.cc Modifications
 
-This document describes modifications made to the honest party binary (`NDSS_online_example.cc`) to support attack testing. Ideally there would be no changes, since we want to attack a party running a normal part of the protocol, but we needed a way to control the input.
+This document describes all modifications made to the honest party binary (`NDSS_online_example.cc`) to support the attack. Ideally there would be no changes, since we want to attack a party running a normal part of the protocol, but we needed a way to control the input.
 
 ## New Command-Line Option
 
