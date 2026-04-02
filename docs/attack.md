@@ -128,3 +128,18 @@ docker exec mosac-dev bazel build --jobs=4 //mosac/example:NDSS_online_example /
 ```
 
 If the build still hangs, try increasing Docker's memory allocation in Docker Desktop settings.
+
+### Docker container not running error
+If the Docker container says it is not running when building the image, for example:
+`Error response from daemon: container <container-id> is not running`
+
+Try out an entrypoint via `/bin/bash`:
+```
+docker run -d \
+  --name mosac-dev \
+  --entrypoint /bin/bash \
+  -v "$(pwd)":/workspace \
+  -w /workspace \
+  secretflow/ubuntu-base-ci:latest \
+  -lc 'while true; do sleep 3600; done'
+```
